@@ -1,5 +1,4 @@
 package samples;
-import java.awt.*;
 
 public class UseField {
     public static void main(String[] args) {
