@@ -49,7 +49,7 @@ abstract class SootConfiguration {
       Options.v().set_soot_classpath(sootClassPath() + File.pathSeparator + pathToJCE() + File.pathSeparator + pathToRT())
     }
     else if (getJavaVersion >= 9) {
-      Options.v.set_soot_classpath(sootClassPath())
+      Options.v.set_soot_classpath("VIRTUAL_FS_FOR_JDK" + File.pathSeparator + sootClassPath())
     }
 
     Options.v().set_whole_program(true)
