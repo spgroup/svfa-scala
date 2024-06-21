@@ -3,7 +3,7 @@ scalaVersion := "2.12.8"
 name := "svfa-scala"
 organization := "br.unb.cic"
 
-version := "0.5.9"
+version := "0.5.10"
 
 githubOwner := "galilasmb"
 githubRepository := "svfa-scala"
@@ -21,7 +21,7 @@ resolvers += Classpaths.typesafeReleases
 
 libraryDependencies += "org.typelevel" %% "cats-core" % "1.6.0"
 
-libraryDependencies += "ca.mcgill.sable" % "soot" % "3.3.0"
+libraryDependencies += "org.soot-oss" % "soot" % "4.3.0"
 libraryDependencies += "com.google.guava" % "guava" % "27.1-jre"
 libraryDependencies += "org.scala-graph" %% "graph-core" % "1.13.0"
 
