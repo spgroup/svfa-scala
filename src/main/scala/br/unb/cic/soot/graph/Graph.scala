@@ -38,6 +38,8 @@ trait GraphNode {
     }
     s"path: $methodsString"
   }
+
+  def toJSON: String
 }
 
 trait LambdaNode extends scala.AnyRef {
@@ -56,7 +58,7 @@ trait LambdaNode extends scala.AnyRef {
 case class Statement(className: String, method: String, stmt: String, line: Int, sootUnit: soot.Unit = null, sootMethod: soot.SootMethod = null)
 
 case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Unit = null, line: Int) {
-  override def toString: String = s"($sootMethod, $sootUnit, $line)"
+  override def toString: String = s"($sootMethod, ${sootUnit.toString().replace("\"", "\'")}, $line)"
   def getMethod = sootMethod
   def getUnit = sootUnit
   def getLine = line
@@ -84,6 +86,20 @@ case class StatementNode(value: Statement, nodeType: NodeType, pathVisitedMethod
 
   override def toString: String =
     "Node(" + value.method + "," + value.stmt + "," + value.line+ "," + nodeType.toString + ", "+pathVisitedMethodsToString+")"
+
+  override def toJSON: String =
+    s"""{
+       |"type": "${nodeType.toString}",
+       |"branch":"",
+       |"text": "${value.stmt.replace("\"", "\'")}",
+       |"location": {
+       |  "file": "",
+       |  "class": "${value.className}",
+       |  "method": "${value.method}",
+       |  "line": "${value.line}"
+       |},
+       |"stackTrace": ${pathVisitedMethods.map(_. toString).mkString("[\"", "\",\"", "\"]")}
+     |}""".stripMargin
 
   override def equals(o: Any): Boolean = {
     o match {
@@ -480,6 +496,18 @@ class Graph() {
 
   def reportConflicts(): scala.collection.Set[String] =
     findConflictingPaths().map(p => p.toString)
+
+  def reportConflictsJSON(): scala.collection.Set[String] =
+    findConflictingPaths().map(p =>
+      s"""{
+         |"type": "CONFLICT",
+         |"label": "SVFA conflict",
+         |"body": {
+         |  "description": "SVFA conflict",
+         |  "interference": ${p.map(c => c.toJSON).mkString("[", ", ", "]")}
+         |}
+         |}""".stripMargin
+    )
 
   def reportConflitcsMessage() = {
     val conflicts = findConflictingPaths()

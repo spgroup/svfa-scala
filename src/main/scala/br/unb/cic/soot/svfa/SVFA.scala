@@ -28,4 +28,8 @@ abstract class SVFA extends SootConfiguration {
     svg.reportConflicts()
   }
 
+  def reportConflictsSVGJSON() = {
+      svg.reportConflictsJSON()
+  }
+
 }
