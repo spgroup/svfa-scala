@@ -519,19 +519,19 @@ class Graph() {
     }
 
     findConflictingPaths().map(p => {
-      val src = p.head.pathVisitedMethods.last
-      val srcUnit = if (src.getUnit != null) src.getUnit else src.getUnitFromMethod
-      val srcElem = findElementInUnit(srcUnit)
+      val defNode = p.head.pathVisitedMethods.last
+      val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getUnitFromMethod
+      val defElem = findElementInUnit(defUnit)
 
-      val sink = p.last.pathVisitedMethods.last
-      val sinkUnit = if (sink.getUnit != null) sink.getUnit else sink.getUnitFromMethod
-      val sinkElem = findElementInUnit(sinkUnit)
+      val useNode = p.last.pathVisitedMethods.last
+      val useUnit = if (useNode.getUnit != null) useNode.getUnit else useNode.getUnitFromMethod
+      val useElem = findElementInUnit(useUnit)
 
       s"""{
          |"type": "CONFLICT",
          |"label": "SVFA conflict",
          |"body": {
-         |  "description": "$srcElem - $sinkElem",
+         |  "description": "$defElem - $useElem",
          |  "interference": ${p.map(c => c.toJSON).mkString("[", ", ", "]")}
          |}
          |}""".stripMargin
