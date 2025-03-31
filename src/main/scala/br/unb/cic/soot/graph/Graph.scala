@@ -84,7 +84,7 @@ case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Uni
    * Get the unit from the soot method if the unit is null.
    * @return The first unit in the soot method that matches the line number if exists, null otherwise.
    */
-  def getUnitFromMethod = {
+  def getMatchingUnitFromMethod = {
     val matchUnits: Array[UnitBox] = sootMethod.getActiveBody.getAllUnitBoxes.stream.filter(u => u.getUnit.getJavaSourceStartLineNumber == line).toArray(size => new Array[UnitBox](size))
     if (matchUnits.length > 0) {
       matchUnits.head.getUnit
@@ -559,11 +559,11 @@ class Graph() {
     findConflictingPaths().map(p => {
       // Get the definition and use nodes
       val defNode = p.head.pathVisitedMethods.last
-      val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getUnitFromMethod
+      val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getMatchingUnitFromMethod
       val defElem = findElementInUnit(defUnit)
 
       val useNode = p.last.pathVisitedMethods.last
-      val useUnit = if (useNode.getUnit != null) useNode.getUnit else useNode.getUnitFromMethod
+      val useUnit = if (useNode.getUnit != null) useNode.getUnit else useNode.getMatchingUnitFromMethod
       val useElem = findElementInUnit(useUnit)
 
       s"""{
