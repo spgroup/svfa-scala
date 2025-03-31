@@ -59,6 +59,18 @@ case class Statement(className: String, method: String, stmt: String, line: Int,
 
 case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Unit = null, line: Int) {
   override def toString: String = s"($sootMethod, ${sootUnit.toString().replace("\"", "\'")}, $line)"
+
+  /**
+   * Creates an alternative representation of the object in JSON format.
+   *
+   * The JSON format is:
+   *
+   * - class: the class name of the method
+   *
+   * - method: the method name
+   *
+   * - line: the line number of the unit
+   */
   def toJSON: String =
     s"""{
        |"class": "${sootMethod.getDeclaringClass}",
@@ -67,6 +79,11 @@ case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Uni
   def getMethod = sootMethod
   def getUnit = sootUnit
   def getLine = line
+
+  /**
+   * Get the unit from the soot method if the unit is null.
+   * @return The first unit in the soot method that matches the line number if exists, null otherwise.
+   */
   def getUnitFromMethod = {
     val matchUnits: Array[UnitBox] = sootMethod.getActiveBody.getAllUnitBoxes.stream.filter(u => u.getUnit.getJavaSourceStartLineNumber == line).toArray(size => new Array[UnitBox](size))
     if (matchUnits.length > 0) {
@@ -510,7 +527,27 @@ class Graph() {
   def reportConflicts(): scala.collection.Set[String] =
     findConflictingPaths().map(p => p.toString)
 
+  /**
+   * Report the conflicts in JSON format.
+   *
+   * The JSON format is:
+   *
+   * - type: the type of the conflict
+   *
+   * - label: the label of the conflict
+   *
+   * - body:
+   *
+   *     - description: the description of the conflict containing info about the definition and use of the element
+   *
+   *     - interference: list of nodes from the conflict path
+   */
   def reportConflictsJSON(): scala.collection.Set[String] = {
+    /**
+     * Find the main element in the unit.
+     * @param unit The unit to find the element.
+     * @return The element found in the unit or "unknown" if not found.
+     */
     def findElementInUnit(unit: soot.Unit): String = {
       val elemPattern = """<.+:.+>""".r
       val unitString = unit.toString()
@@ -518,7 +555,9 @@ class Graph() {
       if (element.isDefined) element.get.replaceAll("\"", "\'") else "unknown"
     }
 
+    // Create the JSON format for each conflict
     findConflictingPaths().map(p => {
+      // Get the definition and use nodes
       val defNode = p.head.pathVisitedMethods.last
       val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getUnitFromMethod
       val defElem = findElementInUnit(defUnit)
