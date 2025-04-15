@@ -532,9 +532,9 @@ class Graph() {
    *
    * The JSON format is:
    *
-   * - type: the type of the conflict
+   * - type: identifier for the analysis that generated the conflict. ex: "DF"
    *
-   * - label: the label of the conflict
+   * - label: general label to describe the conflict. ex: "Intraprocedural Data Flow"
    *
    * - body:
    *
