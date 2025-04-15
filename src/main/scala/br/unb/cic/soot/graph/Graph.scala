@@ -1,7 +1,7 @@
 package br.unb.cic.soot.graph
 
 import scalax.collection.edge.LkDiEdge
-import soot.SootMethod
+import soot.{SootMethod, UnitBox}
 
 import scala.collection.immutable.HashSet
 import scala.collection.mutable.ListBuffer
@@ -59,9 +59,39 @@ case class Statement(className: String, method: String, stmt: String, line: Int,
 
 case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Unit = null, line: Int) {
   override def toString: String = s"($sootMethod, ${sootUnit.toString().replace("\"", "\'")}, $line)"
+
+  /**
+   * Creates an alternative representation of the object in JSON format.
+   *
+   * The JSON format is:
+   *
+   * - class: the class name of the method
+   *
+   * - method: the method name
+   *
+   * - line: the line number of the unit
+   */
+  def toJSON: String =
+    s"""{
+       |"class": "${sootMethod.getDeclaringClass}",
+       |"method": "$sootMethod",
+       |"line": "$line"}""".stripMargin
   def getMethod = sootMethod
   def getUnit = sootUnit
   def getLine = line
+
+  /**
+   * Get the unit from the soot method if the unit is null.
+   * @return The first unit in the soot method that matches the line number if exists, null otherwise.
+   */
+  def getMatchingUnitFromMethod = {
+    val matchUnits: Array[UnitBox] = sootMethod.getActiveBody.getAllUnitBoxes.stream.filter(u => u.getUnit.getJavaSourceStartLineNumber == line).toArray(size => new Array[UnitBox](size))
+    if (matchUnits.length > 0) {
+      matchUnits.head.getUnit
+    } else {
+      null
+    }
+  }
 }
 
 /*
@@ -98,7 +128,7 @@ case class StatementNode(value: Statement, nodeType: NodeType, pathVisitedMethod
        |  "method": "${value.method}",
        |  "line": "${value.line}"
        |},
-       |"stackTrace": ${pathVisitedMethods.map(_. toString).mkString("[\"", "\",\"", "\"]")}
+       |"stackTrace": ${pathVisitedMethods.map(_. toJSON).mkString("[", ",", "]")}
      |}""".stripMargin
 
   override def equals(o: Any): Boolean = {
@@ -497,17 +527,56 @@ class Graph() {
   def reportConflicts(): scala.collection.Set[String] =
     findConflictingPaths().map(p => p.toString)
 
-  def reportConflictsJSON(): scala.collection.Set[String] =
-    findConflictingPaths().map(p =>
+  /**
+   * Report the conflicts in JSON format.
+   *
+   * The JSON format is:
+   *
+   * - type: identifier for the analysis that generated the conflict. ex: "DF"
+   *
+   * - label: general label to describe the conflict. ex: "Intraprocedural Data Flow"
+   *
+   * - body:
+   *
+   *     - description: the description of the conflict containing info about the definition and use of the element
+   *
+   *     - interference: list of nodes from the conflict path
+   */
+  def reportConflictsJSON(): scala.collection.Set[String] = {
+    /**
+     * Find the main element in the unit.
+     * @param unit The unit to find the element.
+     * @return The element found in the unit or "unknown" if not found.
+     */
+    def findElementInUnit(unit: soot.Unit): String = {
+      val elemPattern = """<.+:.+>""".r
+      val unitString = unit.toString()
+      val element = elemPattern.findFirstIn(unitString)
+      if (element.isDefined) element.get.replaceAll("\"", "\'") else "unknown"
+    }
+
+    // Create the JSON format for each conflict
+    findConflictingPaths().map(p => {
+      // Get the definition and use nodes
+      val defNode = p.head.pathVisitedMethods.last
+      val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getMatchingUnitFromMethod
+      val defElem = findElementInUnit(defUnit)
+
+      val useNode = p.last.pathVisitedMethods.last
+      val useUnit = if (useNode.getUnit != null) useNode.getUnit else useNode.getMatchingUnitFromMethod
+      val useElem = findElementInUnit(useUnit)
+
       s"""{
          |"type": "CONFLICT",
          |"label": "SVFA conflict",
          |"body": {
-         |  "description": "SVFA conflict",
+         |  "description": "$defElem - $useElem",
          |  "interference": ${p.map(c => c.toJSON).mkString("[", ", ", "]")}
          |}
          |}""".stripMargin
+    }
     )
+  }
 
   def reportConflitcsMessage() = {
     val conflicts = findConflictingPaths()
