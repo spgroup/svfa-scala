@@ -3,11 +3,16 @@ scalaVersion := "2.12.8"
 name := "svfa-scala"
 organization := "br.unb.cic"
 
-version := "0.5.9"
+version := "0.6.2"
 
-githubOwner := "galilasmb"
-githubRepository := "svfa-scala"
-githubTokenSource := TokenSource.GitConfig("github.token")
+publishTo := Some("GitHub Packages" at "https://maven.pkg.github.com/galilasmb/svfa-scala")
+
+credentials += Credentials(
+  "GitHub Package Registry",
+  "maven.pkg.github.com",
+  sys.env.getOrElse("GITHUB_USERNAME", ""),
+  sys.env.getOrElse("GITHUB_TOKEN", "")
+)
 
 parallelExecution in Test := false
 
