@@ -3,7 +3,7 @@ scalaVersion := "2.12.8"
 name := "svfa-scala"
 organization := "br.unb.cic"
 
-version := "0.6.2"
+version := "0.7.0"
 
 publishTo := Some("GitHub Packages" at "https://maven.pkg.github.com/galilasmb/svfa-scala")
 

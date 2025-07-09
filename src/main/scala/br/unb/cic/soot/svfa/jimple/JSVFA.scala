@@ -336,15 +336,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     })
   }
 
-  private def invokeRule(
-                          callStmt: Statement,
-                          exp: InvokeExpr,
-                          caller: SootMethod,
-                          callee: SootMethod,
-                          defs: SimpleLocalDefs,
-                          visitedMethods: ListBuffer[VisitedMethods]
-                        ): Unit = {
-    //  private def invokeRule(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
+  private def invokeRule(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     val callee = exp.getMethod
 
     if (analyze(callStmt.base) == SinkNode) {
@@ -416,20 +408,6 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
           updateGraph(sourceNode, targetNode)
         })
       })
-    }
-  }
-
-  private def invokeRule(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
-    val edges = Scene.v().getCallGraph.edgesOutOf(callStmt.base)
-
-    if (!edges.hasNext) {
-      countNoEdges += 1
-      invokeRule(callStmt, exp, caller, exp.getMethod, defs, visitedMethods)
-    }
-    while (edges.hasNext) {
-      countWithEdges += 1
-      val e = edges.next
-      invokeRule(callStmt, exp, caller, e.getTgt.method(), defs, visitedMethods)
     }
   }
 
@@ -789,23 +767,60 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
    */
   def runInFullSparsenessMode() = true
 
+//  def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
+//    val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
+//    for (node <- svg.nodes()) {
+//      if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
+//        val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
+//        if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
+//          val base = assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getBase.asInstanceOf[Local]
+//          if (pointsToAnalysis.reachingObjects(base).hasNonEmptyIntersection(pointsToAnalysis.reachingObjects(local))) {
+//            if (field.equals(assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getField)) {
+//              res += createNode(node.method(), node.unit(), visitedMethods)
+//            }
+//          }
+//        }
+//      }
+//    }
+//    return res
+//  }
+
   def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
     val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
-    for (node <- svg.nodes()) {
-      if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
-        val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
-        if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
-          val base = assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getBase.asInstanceOf[Local]
-          if (pointsToAnalysis.reachingObjects(base).hasNonEmptyIntersection(pointsToAnalysis.reachingObjects(local))) {
-            if (field.equals(assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getField)) {
-              res += createNode(node.method(), node.unit(), visitedMethods)
+    try {
+      for (node <- svg.nodes()) {
+        if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
+          val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
+          if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
+            val instanceRef = assignment.getLeftOp.asInstanceOf[InstanceFieldRef]
+            val base = instanceRef.getBase match {
+              case l: Local => l
+              case _ => null
+            }
+            if (base != null && local != null) {
+              val baseObjs = pointsToAnalysis.reachingObjects(base)
+              val localObjs = pointsToAnalysis.reachingObjects(local)
+
+              if (baseObjs != null && localObjs != null) {
+                if (baseObjs.hasNonEmptyIntersection(localObjs)) {
+                  if (field.equals(instanceRef.getField)) {
+                    res += createNode(node.method(), node.unit(), visitedMethods)
+                  }
+                }
+              }
+
             }
           }
         }
       }
+    } catch {
+      case _: Exception =>
     }
-    return res
+
+    res
   }
+
+
 
   //  /*
   //   * It either updates the graph or not, depending on
