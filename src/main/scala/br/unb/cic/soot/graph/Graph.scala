@@ -58,7 +58,7 @@ trait LambdaNode extends scala.AnyRef {
 case class Statement(className: String, method: String, stmt: String, line: Int, sootUnit: soot.Unit = null, sootMethod: soot.SootMethod = null)
 
 case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Unit = null, line: Int) {
-  override def toString: String = s"($sootMethod, ${sootUnit.toString().replace("\"", "\'")}, $line)"
+  override def toString: String = s"($sootMethod, ${if (sootUnit != null) sootUnit.toString().replace("\"", "\'") else "null"}, $line)"
 
   /**
    * Creates an alternative representation of the object in JSON format.
@@ -555,27 +555,29 @@ class Graph() {
       if (element.isDefined) element.get.replaceAll("\"", "\'") else "unknown"
     }
 
-    // Create the JSON format for each conflict
-    findConflictingPaths().map(p => {
-      // Get the definition and use nodes
-      val defNode = p.head.pathVisitedMethods.last
-      val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getMatchingUnitFromMethod
-      val defElem = findElementInUnit(defUnit)
+    findConflictingPaths().flatMap { p =>
+      for {
+        defNode <- p.head.pathVisitedMethods.lastOption
+        useNode <- p.last.pathVisitedMethods.lastOption
+      } yield {
+        val defUnit =
+          Option(defNode.getUnit).getOrElse(defNode.getMatchingUnitFromMethod)
+        val useUnit =
+          Option(useNode.getUnit).getOrElse(useNode.getMatchingUnitFromMethod)
 
-      val useNode = p.last.pathVisitedMethods.last
-      val useUnit = if (useNode.getUnit != null) useNode.getUnit else useNode.getMatchingUnitFromMethod
-      val useElem = findElementInUnit(useUnit)
+        val defElem = findElementInUnit(defUnit)
+        val useElem = findElementInUnit(useUnit)
 
-      s"""{
-         |"type": "CONFLICT",
-         |"label": "SVFA conflict",
-         |"body": {
-         |  "description": "$defElem - $useElem",
-         |  "interference": ${p.map(c => c.toJSON).mkString("[", ", ", "]")}
-         |}
-         |}""".stripMargin
+        s"""{
+           |"type": "CONFLICT",
+           |"label": "SVFA conflict",
+           |"body": {
+           |  "description": "$defElem - $useElem",
+           |  "interference": ${p.map(_.toJSON).mkString("[", ", ", "]")}
+           |}
+           |}""".stripMargin
+      }
     }
-    )
   }
 
   def reportConflitcsMessage() = {
