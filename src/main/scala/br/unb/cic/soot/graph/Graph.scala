@@ -599,8 +599,8 @@ class Graph() {
       val conflicts = findPathsFullGraph()
       conflicts.toSet
     } else {
-      val sourceNodes = nodes.filter(n => n.nodeType == SourceNode)
-      val sinkNodes = nodes.filter(n => n.nodeType == SinkNode)
+      val sourceNodes = nodes.filter(n => n != null && n.nodeType == SourceNode)
+      val sinkNodes = nodes.filter(n => n != null && n.nodeType == SinkNode)
 
       var conflicts: List[List[GraphNode]] = List()
       sourceNodes.foreach(source => {

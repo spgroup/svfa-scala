@@ -766,7 +766,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
         case n: StringConstant => n.getType
         case _ => null
       }
-      if (keyType != null && (keyType == fieldType || (keyType.isInstanceOf[RefType] && fieldType.isInstanceOf[RefType] && hierarchy.canStoreType(keyType, fieldType)))) {
+      if (node != null && keyType != null && (keyType == fieldType || (keyType.isInstanceOf[RefType] && fieldType.isInstanceOf[RefType] && hierarchy.canStoreType(keyType, fieldType)))) {
         res += node
       }
     }
@@ -807,13 +807,13 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
           val allocType = newExpr.getBaseType
           if (isTypeCompatible(localType, allocType, hierarchy)) {
             if (field == null || hasFieldStore(node, field)) {
-              res += node
+              if (node != null) res += node
             }
           }
         case newArrayExpr: NewArrayExpr =>
           val allocType = newArrayExpr.getType
           if (isTypeCompatible(localType, allocType, hierarchy)) {
-            res += node
+            if (node != null) res += node
           }
         case _ =>
       }
@@ -982,14 +982,16 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     for (n <- svg.edges()) {
       var auxNodeFrom = n.from.asInstanceOf[StatementNode]
       var auxNodeTo = n.to.asInstanceOf[StatementNode]
-      if (auxNodeFrom.equals(node)) return n.from.asInstanceOf[StatementNode]
-      if (auxNodeTo.equals(node)) return n.to.asInstanceOf[StatementNode]
+      if (auxNodeFrom != null && auxNodeFrom.equals(node)) return n.from.asInstanceOf[StatementNode]
+      if (auxNodeTo != null && auxNodeTo.equals(node)) return n.to.asInstanceOf[StatementNode]
     }
     return null
   }
 
   def updateGraph(source: GraphNode, target: GraphNode, forceNewEdge: Boolean = false): Boolean = {
     var res = false
+    if (source == null || target == null) return false
+    
     if (!runInFullSparsenessMode() || true) {
       addNodeAndEdgeDF(source.asInstanceOf[StatementNode], target.asInstanceOf[StatementNode])
 
