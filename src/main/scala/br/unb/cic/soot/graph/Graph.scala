@@ -345,8 +345,10 @@ class Graph() {
 
       val foundedPaths = findPathsOP(sourceNode, sourceNode, sinkNode, HashSet(sourceNode), ignoredNodes, maxConflictsNumber)
       val validPaths = foundedPaths.filter(path => isValidPath(sourceNode, sinkNode, path))
-      if (validPaths.nonEmpty)
+      if (validPaths.nonEmpty) {
+        println("[CONFLICT_FOUND]")
         paths = paths ++ List(validPaths.head)
+      }
     }
 
     return paths
@@ -608,6 +610,7 @@ class Graph() {
           val paths = findPath(source, sink)
           val pathsHaveSameSourceAndSinkRootTraversedLine: Boolean = conflicts.exists(c => paths.exists(p => c.head.line() == p.head.line() && c.last.line() == p.last.line()))
           if (!pathsHaveSameSourceAndSinkRootTraversedLine){
+            paths.foreach(_ => println("[CONFLICT_FOUND]"))
             conflicts = conflicts ++ paths
           }
         })
