@@ -16,7 +16,7 @@ import soot.toolkits.graph.ExceptionalUnitGraph
 import soot.toolkits.scalar.SimpleLocalDefs
 import soot.jimple.toolkits.callgraph.Edge
 import soot.{ArrayType, FastHierarchy, Local, PointsToSet, RefType, Scene, SceneTransformer, SootField, SootMethod, Transform, Value, jimple}
-
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
 
 /**
@@ -31,6 +31,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   var printDepthVisitedMethods: Boolean = false
   var methods = 0
   val traversedMethods = scala.collection.mutable.Set.empty[SootMethod]
+  val storedFields = scala.collection.mutable.Set.empty[SootField]
   val allocationSites = scala.collection.mutable.HashMap.empty[soot.Value, StatementNode]
   val arrayStores = scala.collection.mutable.HashMap.empty[Local, List[soot.Unit]]
   val languageParser = new LanguageParser(this)
@@ -201,6 +202,13 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       val body = m.getActiveBody
       body.getUnits.forEach(unit => {
         if (unit.isInstanceOf[soot.jimple.AssignStmt]) {
+          val left = unit.asInstanceOf[soot.jimple.AssignStmt].getLeftOp
+          if (left.isInstanceOf[InstanceFieldRef]) {
+            storedFields.add(left.asInstanceOf[InstanceFieldRef].getField)
+          } else if (left.isInstanceOf[StaticFieldRef]) {
+            storedFields.add(left.asInstanceOf[StaticFieldRef].getField)
+          }
+
           val right = unit.asInstanceOf[soot.jimple.AssignStmt].getRightOp
           if (right.isInstanceOf[soot.jimple.InstanceInvokeExpr]) {
             val method = right.asInstanceOf[soot.jimple.InstanceInvokeExpr]
@@ -240,11 +248,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   }
 
   def traverse(method: SootMethod, visitedMethods: ListBuffer[VisitedMethods], forceNewTraversal: Boolean = false): Unit = {
-    if ((!forceNewTraversal) && (method.isPhantom || traversedMethods.contains(method))) {
-      return
-    }
-
-    if (isLimited() && visitedMethodsDepth.size >= maxDepth()) {
+    if ((!forceNewTraversal) && shouldSkip(method)) {
       return
     }
 
@@ -260,18 +264,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     val graph = new ExceptionalUnitGraph(body)
     val defs = new SimpleLocalDefs(graph)
 
-    body.getUnits.forEach(unit => {
-      val v = Statement.convert(unit)
-      val auxVisitedMethod = new ListBuffer[VisitedMethods]()
-      auxVisitedMethod.++=(visitedMethods)
-      auxVisitedMethod += new VisitedMethods(method, unit, unit.getJavaSourceStartLineNumber)
-      v match {
-        case AssignStmt(base) => traverse(AssignStmt(base), method, defs, auxVisitedMethod)
-        case InvokeStmt(base) => traverse(InvokeStmt(base), method, defs, auxVisitedMethod)
-        case _ if analyze(unit) == SinkNode => traverseSinkStatement(v, method, defs, auxVisitedMethod)
-        case _ =>
-      }
-    })
+    traverseUnits(method, defs, visitedMethods)
 
     val endTime = System.nanoTime()
     val elapsedTime = (endTime - startTime) / 1000000
@@ -284,6 +277,25 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       println(method.toString + "path:" + methodsString + "-> deep: " + visitedMethodsDepth.size + " time: " + elapsedSeconds)
     }
 
+    traversedMethods.remove(method)
+  }
+
+  private def traverseUnits(method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
+    val body = method.getActiveBody
+    body.getUnits.forEach(unit => {
+      val v = Statement.convert(unit)
+
+      val auxVisitedMethod = new ListBuffer[VisitedMethods]()
+      auxVisitedMethod.++=(visitedMethods)
+      auxVisitedMethod += new VisitedMethods(method, unit, unit.getJavaSourceStartLineNumber)
+
+      v match {
+        case AssignStmt(base) => traverse(AssignStmt(base), method, defs, auxVisitedMethod)
+        case InvokeStmt(base) => traverse(InvokeStmt(base), method, defs, auxVisitedMethod)
+        case _ if analyze(unit) == SinkNode => traverseSinkStatement(v, method, defs, auxVisitedMethod)
+        case _ =>
+      }
+    })
   }
 
   def traverse(assignStmt: AssignStmt, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
@@ -414,7 +426,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
     traverse(callee, visitedMethods)
 
-    visitedMethodsDepth -= callee.retrieveActiveBody().getMethod
+    visitedMethodsDepth.remove(visitedMethodsDepth.size - 1)
   }
 
   private def applyPhantomMethodCallRule(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
@@ -802,23 +814,24 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     val hierarchy = Scene.v().getOrMakeFastHierarchy
 
     for ((key, node) <- allocationSites) {
-      key match {
-        case newExpr: NewExpr =>
-          val allocType = newExpr.getBaseType
-          if (isTypeCompatible(localType, allocType, hierarchy)) {
-            if (field == null || hasFieldStore(node, field)) {
-              if (node != null) res += node
-            }
-          }
-        case newArrayExpr: NewArrayExpr =>
-          val allocType = newArrayExpr.getType
-          if (isTypeCompatible(localType, allocType, hierarchy)) {
-            if (node != null) res += node
-          }
-        case _ =>
+      val allocType = key match {
+        case newExpr: NewExpr => newExpr.getBaseType
+        case newArrayExpr: NewArrayExpr => newArrayExpr.getType
+        case _: StringConstant => RefType.v("java.lang.String")
+        case _ => null
+      }
+
+      if (allocType != null && isTypeCompatible(localType, allocType, hierarchy)) {
+        if (field == null || hasAnyFieldStore(field)) {
+          if (node != null) res += node
+        }
       }
     }
     res
+  }
+
+  private def hasAnyFieldStore(field: SootField): Boolean = {
+    storedFields.contains(field)
   }
 
   /**
@@ -849,20 +862,6 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
    * Verifica se existe um store para o field especificado em algum nó do grafo
    * cujo allocation site corresponde ao nó dado.
    */
-  private def hasFieldStore(allocNode: StatementNode, field: SootField): Boolean = {
-    for (node <- svg.nodes()) {
-      if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
-        val assign = node.unit().asInstanceOf[soot.jimple.AssignStmt]
-        if (assign.getLeftOp.isInstanceOf[InstanceFieldRef]) {
-          val fieldRef = assign.getLeftOp.asInstanceOf[InstanceFieldRef]
-          if (field.equals(fieldRef.getField)) {
-            return true
-          }
-        }
-      }
-    }
-    false
-  }
 
   /*
    * a class to visit the allocation nodes of the objects that
@@ -1029,5 +1028,91 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   def getCountNoEdges: Int = countNoEdges
 
   def getCountWithEdges: Int = countWithEdges
+
+  private def shouldSkip(method: SootMethod): Boolean = {
+    val res = method.isPhantom || 
+      hasRelativeBeenTraversed(method) || 
+      (isLimited() && visitedMethodsDepth.size >= maxDepth()) || 
+      isMethodDefinedInObject(method)
+    
+    if (res && !method.isPhantom && !isMethodDefinedInObject(method)) {
+       println(s"Skipping method: ${method.getSignature} | reason: ${if (hasRelativeBeenTraversed(method)) "relative traversed" else "depth limit"}")
+    }
+    res
+  }
+
+  private def hasRelativeBeenTraversed(method: SootMethod): Boolean = {
+    visitedMethodsDepth.exists(m => haveCommonAncestorClass(method, m))
+  }
+
+  private def haveCommonAncestorClass(method1: SootMethod, method2: SootMethod): Boolean = {
+    val ancestors1 = getAncestors(method1).asScala
+    val ancestors2 = getAncestors(method2).asScala
+
+    for (ancestor1 <- ancestors1) {
+      for (ancestor2 <- ancestors2) {
+        try {
+          val ancestorMethod1 = ancestor1.getMethod(method1.getName, method1.getParameterTypes)
+          val ancestorMethod2 = ancestor2.getMethod(method2.getName, method2.getParameterTypes)
+          if (ancestorMethod1 == ancestorMethod2) {
+             println(s"Relative found: ${method1.getSignature} and ${method2.getSignature} share ${ancestorMethod1.getSignature}")
+             return true
+          }
+        } catch {
+          case _: Exception => // ignore
+        }
+      }
+    }
+    false
+  }
+
+  private def getAncestors(method: SootMethod): java.util.Set[soot.SootClass] = {
+    val ancestors = new java.util.HashSet[soot.SootClass]()
+    var sootClass = method.getDeclaringClass
+    ancestors.add(sootClass)
+    while (sootClass.hasSuperclass) {
+      sootClass = sootClass.getSuperclass
+      ancestors.add(sootClass)
+    }
+    
+    // Get interfaces recursively
+    val interfaces = new java.util.HashSet[soot.SootClass]()
+    val queue = new java.util.LinkedList[soot.SootClass]()
+    ancestors.asScala.foreach(c => queue.add(c))
+    
+    while (!queue.isEmpty) {
+      val c = queue.poll()
+      c.getInterfaces.asScala.foreach(i => {
+        if (!ancestors.contains(i)) {
+          ancestors.add(i)
+          queue.add(i)
+        }
+      })
+    }
+
+    val ancestorsWithMethod = new java.util.HashSet[soot.SootClass]()
+    ancestors.asScala.foreach(ancestor => {
+      try {
+        val ancestorMethod = ancestor.getMethod(method.getName, method.getParameterTypes)
+        if (ancestorMethod != null) {
+          ancestorsWithMethod.add(ancestor)
+        }
+      } catch {
+        case _: Exception => // ignore
+      }
+    })
+    ancestorsWithMethod
+  }
+
+  private def isMethodDefinedInObject(method: SootMethod): Boolean = {
+    val methodName = method.getName
+    methodName.equals("toString") ||
+      methodName.equals("hashCode") ||
+      methodName.equals("equals") ||
+      methodName.equals("getClass") ||
+      methodName.equals("notify") ||
+      methodName.equals("notifyAll") ||
+      methodName.equals("wait")
+  }
 
 }
