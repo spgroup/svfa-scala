@@ -510,7 +510,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       allocationNodes.foreach(source => {
         val target = createNode(method, stmt, visitedMethods)
         updateGraph(source, target)
-        svg.getAdjacentNodes(source).get.foreach(s => updateGraph(s, target))
+        svg.getAdjacentNodes(source).getOrElse(List()).foreach(s => updateGraph(s, target))
       })
 
       // create an edge from the base defs to target
@@ -753,7 +753,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       else pointsToAnalysis.reachingObjects(local, field)
 
       if (reachingObjects != null && !reachingObjects.isEmpty) {
-        return findAllocationSitesFromPS(reachingObjects, oldSet)
+        val res = findAllocationSitesFromPS(reachingObjects, oldSet)
+        if (res.nonEmpty) return res
       }
     }
     findAllocationSitesByType(local, field)
@@ -763,7 +764,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     if (pointsToAnalysis != null) {
       val reachingObjects = pointsToAnalysis.reachingObjects(field)
       if (reachingObjects != null && !reachingObjects.isEmpty) {
-        return findAllocationSitesFromPS(reachingObjects, true)
+        val res = findAllocationSitesFromPS(reachingObjects, true)
+        if (res.nonEmpty) return res
       }
     }
     // For static fields, fallback to type compatibility if possible
@@ -1030,14 +1032,16 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   def getCountWithEdges: Int = countWithEdges
 
   private def shouldSkip(method: SootMethod): Boolean = {
+
+    val isCycle = traversedMethods.contains(method)
+    val relativeTraversed = hasRelativeBeenTraversed(method)
+    
     val res = method.isPhantom || 
-      hasRelativeBeenTraversed(method) || 
+      isCycle ||
+      relativeTraversed || 
       (isLimited() && visitedMethodsDepth.size >= maxDepth()) || 
       isMethodDefinedInObject(method)
-    
-    if (res && !method.isPhantom && !isMethodDefinedInObject(method)) {
-       println(s"Skipping method: ${method.getSignature} | reason: ${if (hasRelativeBeenTraversed(method)) "relative traversed" else "depth limit"}")
-    }
+
     res
   }
 
@@ -1054,10 +1058,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
         try {
           val ancestorMethod1 = ancestor1.getMethod(method1.getName, method1.getParameterTypes)
           val ancestorMethod2 = ancestor2.getMethod(method2.getName, method2.getParameterTypes)
-          if (ancestorMethod1 == ancestorMethod2) {
-             println(s"Relative found: ${method1.getSignature} and ${method2.getSignature} share ${ancestorMethod1.getSignature}")
-             return true
-          }
+          return ancestorMethod1 == ancestorMethod2
         } catch {
           case _: Exception => // ignore
         }
