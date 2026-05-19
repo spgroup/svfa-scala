@@ -813,6 +813,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     val res = new ListBuffer[GraphNode]()
     val localType = local.getType
 
+    val targetType = if (field != null) field.getType else local.getType
+
     val hierarchy = Scene.v().getOrMakeFastHierarchy
 
     for ((key, node) <- allocationSites) {
@@ -823,7 +825,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
         case _ => null
       }
 
-      if (allocType != null && isTypeCompatible(localType, allocType, hierarchy)) {
+      if (allocType != null && isTypeCompatible(targetType, allocType, hierarchy)) {
         if (field == null || hasAnyFieldStore(field)) {
           if (node != null) res += node
         }
@@ -917,23 +919,23 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
    */
   def runInFullSparsenessMode() = true
 
-//  def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
-//    val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
-//    for (node <- svg.nodes()) {
-//      if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
-//        val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
-//        if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
-//          val base = assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getBase.asInstanceOf[Local]
-//          if (pointsToAnalysis.reachingObjects(base).hasNonEmptyIntersection(pointsToAnalysis.reachingObjects(local))) {
-//            if (field.equals(assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getField)) {
-//              res += createNode(node.method(), node.unit(), visitedMethods)
-//            }
-//          }
-//        }
-//      }
-//    }
-//    return res
-//  }
+  //  def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
+  //    val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
+  //    for (node <- svg.nodes()) {
+  //      if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
+  //        val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
+  //        if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
+  //          val base = assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getBase.asInstanceOf[Local]
+  //          if (pointsToAnalysis.reachingObjects(base).hasNonEmptyIntersection(pointsToAnalysis.reachingObjects(local))) {
+  //            if (field.equals(assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getField)) {
+  //              res += createNode(node.method(), node.unit(), visitedMethods)
+  //            }
+  //          }
+  //        }
+  //      }
+  //    }
+  //    return res
+  //  }
 
   def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
     val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
@@ -948,14 +950,16 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
               case _ => null
             }
             if (base != null && local != null && field.equals(instanceRef.getField)) {
-              val baseObjs = pointsToAnalysis.reachingObjects(base)
-              val localObjs = pointsToAnalysis.reachingObjects(local)
+              if (pointsToAnalysis != null) {
+                val baseObjs = pointsToAnalysis.reachingObjects(base)
+                val localObjs = pointsToAnalysis.reachingObjects(local)
 
-              if (baseObjs != null && localObjs != null
-                && !baseObjs.isEmpty && !localObjs.isEmpty) {
-                // SPARK/VTA: usa interseção de points-to (preciso)
-                if (baseObjs.hasNonEmptyIntersection(localObjs)) {
-                  res += createNode(node.method(), node.unit(), visitedMethods)
+                if (baseObjs != null && localObjs != null
+                  && !baseObjs.isEmpty && !localObjs.isEmpty) {
+                  // SPARK/VTA: usa interseção de points-to (preciso)
+                  if (baseObjs.hasNonEmptyIntersection(localObjs)) {
+                    res += createNode(node.method(), node.unit(), visitedMethods)
+                  }
                 }
               } else {
                 // CHA/RTA: points-to vazio, fallback por tipo
@@ -992,7 +996,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   def updateGraph(source: GraphNode, target: GraphNode, forceNewEdge: Boolean = false): Boolean = {
     var res = false
     if (source == null || target == null) return false
-    
+
     if (!runInFullSparsenessMode() || true) {
       addNodeAndEdgeDF(source.asInstanceOf[StatementNode], target.asInstanceOf[StatementNode])
 
@@ -1035,11 +1039,11 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
     val isCycle = traversedMethods.contains(method)
     val relativeTraversed = hasRelativeBeenTraversed(method)
-    
-    val res = method.isPhantom || 
+
+    val res = method.isPhantom ||
       isCycle ||
-      relativeTraversed || 
-      (isLimited() && visitedMethodsDepth.size >= maxDepth()) || 
+      relativeTraversed ||
+      (isLimited() && visitedMethodsDepth.size >= maxDepth()) ||
       isMethodDefinedInObject(method)
 
     res
@@ -1075,12 +1079,12 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       sootClass = sootClass.getSuperclass
       ancestors.add(sootClass)
     }
-    
+
     // Get interfaces recursively
     val interfaces = new java.util.HashSet[soot.SootClass]()
     val queue = new java.util.LinkedList[soot.SootClass]()
     ancestors.asScala.foreach(c => queue.add(c))
-    
+
     while (!queue.isEmpty) {
       val c = queue.poll()
       c.getInterfaces.asScala.foreach(i => {
