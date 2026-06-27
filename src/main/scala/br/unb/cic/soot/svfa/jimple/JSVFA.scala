@@ -400,7 +400,14 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
     if (intraprocedural()) return
 
-    if (!callee.hasActiveBody) return
+    if (!callee.hasActiveBody) {
+      try {
+        callee.retrieveActiveBody()
+      } catch {
+        case e: Exception => 
+          return
+      }
+    }
 
     val body = callee.retrieveActiveBody()
     val g = new ExceptionalUnitGraph(body)
@@ -424,7 +431,14 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     })
     visitedMethodsDepth += callee.retrieveActiveBody().getMethod
 
-    traverse(callee, visitedMethods)
+    val nextVisitedMethods = new scala.collection.mutable.ListBuffer[VisitedMethods]()
+    nextVisitedMethods.++=(visitedMethods)
+    // Fix for DFP: if the parent traversal didn't append the current caller to the stack, we append it here
+    if (nextVisitedMethods.isEmpty || nextVisitedMethods.last.getUnit != callStmt.base) {
+      nextVisitedMethods += new VisitedMethods(caller, callStmt.base, callStmt.base.getJavaSourceStartLineNumber)
+    }
+
+    traverse(callee, nextVisitedMethods)
 
     visitedMethodsDepth.remove(visitedMethodsDepth.size - 1)
   }
@@ -1050,7 +1064,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   }
 
   private def hasRelativeBeenTraversed(method: SootMethod): Boolean = {
-    visitedMethodsDepth.exists(m => haveCommonAncestorClass(method, m))
+    visitedMethodsDepth.exists(m => m != method && haveCommonAncestorClass(method, m))
   }
 
   private def haveCommonAncestorClass(method1: SootMethod, method2: SootMethod): Boolean = {
