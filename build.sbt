@@ -24,7 +24,7 @@ resolvers += "SPG Maven Repository" at "https://maven.pkg.github.com/spgroup/soo
 
 libraryDependencies += "org.typelevel" %% "cats-core" % "1.6.0"
 
-libraryDependencies += "org.soot-oss" % "soot" % "4.5.1"
+libraryDependencies += "org.soot-oss" % "soot" % "4.5.0"
 libraryDependencies += "com.google.guava" % "guava" % "27.1-jre"
 libraryDependencies += "org.scala-graph" %% "graph-core" % "1.13.0"
 
