@@ -10,6 +10,8 @@ sealed trait CG
 case object CHA extends CG
 case object SPARK_LIBRARY extends CG
 case object SPARK extends CG
+case object VTA extends CG
+case object RTA extends CG
 
 /**
  * Base class for all implementations
@@ -71,6 +73,15 @@ abstract class SootConfiguration {
         Options.v().setPhaseOption("cg.spark", "on")
         Options.v().setPhaseOption("cg.spark", "cs-demand:true")
         Options.v().setPhaseOption("cg.spark", "string-constants:true")
+      }
+      case RTA => {
+        Options.v().setPhaseOption("cg.spark", "enabled:true");
+        Options.v().setPhaseOption("cg.spark", "rta:true");
+        Options.v().setPhaseOption("cg.spark", "on-fly-cg:false");
+      }
+      case VTA => {
+        Options.v.setPhaseOption("cg.spark", "enabled:true")
+        Options.v.setPhaseOption("cg.spark", "vta:true")
       }
       case SPARK_LIBRARY => {
         Options.v().setPhaseOption("cg.spark", "on")
