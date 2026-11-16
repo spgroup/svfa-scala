@@ -11,18 +11,19 @@ import soot.jimple.internal.{JArrayRef, JAssignStmt, JInstanceFieldRef}
 import soot.jimple.spark.ondemand.DemandCSPointsTo
 import soot.jimple.spark.pag
 import soot.jimple.spark.pag.{AllocNode, PAG}
-import soot.jimple.spark.sets.{DoublePointsToSet, HybridPointsToSet, P2SetVisitor}
+import soot.jimple.spark.sets.{DoublePointsToSet, HybridPointsToSet, PointsToSetInternal, P2SetVisitor}
 import soot.toolkits.graph.ExceptionalUnitGraph
 import soot.toolkits.scalar.SimpleLocalDefs
-import soot.{ArrayType, Local, PointsToSet, Scene, SceneTransformer, SootField, SootMethod, Transform, Value, jimple}
-
+import soot.jimple.toolkits.callgraph.Edge
+import soot.{ArrayType, FastHierarchy, Local, PointsToSet, RefType, Scene, SceneTransformer, SootField, SootMethod, Transform, Value, jimple}
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
 
 /**
  * A Jimple based implementation of
  * SVFA.
  */
-abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSensitiveness with ObjectPropagation with SourceSinkDef with LazyLogging  with DSL {
+abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSensitiveness with ObjectPropagation with SourceSinkDef with LazyLogging with DSL {
 
   val visitedMethodsDepth = new ListBuffer[SootMethod]()
   val visitedMethodsAllocationSites = scala.collection.mutable.Set.empty[SootMethod]
@@ -30,10 +31,13 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   var printDepthVisitedMethods: Boolean = false
   var methods = 0
   val traversedMethods = scala.collection.mutable.Set.empty[SootMethod]
+  val storedFields = scala.collection.mutable.Set.empty[SootField]
   val allocationSites = scala.collection.mutable.HashMap.empty[soot.Value, StatementNode]
   val arrayStores = scala.collection.mutable.HashMap.empty[Local, List[soot.Unit]]
   val languageParser = new LanguageParser(this)
   val methodRules = languageParser.evaluate(code())
+  var countNoEdges: Int = 0
+  var countWithEdges: Int = 0
 
   /*
    * Create an edge  from the definition of the local argument
@@ -53,23 +57,23 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       var srcArg: Value = null
       var expr: InvokeExpr = null
 
-      try{
+      try {
         srcArg = invokeStmt.getInvokeExpr.getArg(from)
         expr = invokeStmt.getInvokeExpr
-      }catch {
-        case e: Exception=>
-          println("An error occurred in getInvokeExpr with args: "+invokeStmt.getInvokeExpr+" -> "+e)
+      } catch {
+        case e: Exception =>
+          println("An error occurred in getInvokeExpr with args: " + invokeStmt.getInvokeExpr + " -> " + e)
       }
-      if(hasBaseObject(expr) && srcArg.isInstanceOf[Local]) {
+      if (hasBaseObject(expr) && srcArg.isInstanceOf[Local]) {
         val local = srcArg.asInstanceOf[Local]
 
         val base = getBaseObject(expr)
 
-        if(base.isInstanceOf[Local]) {
+        if (base.isInstanceOf[Local]) {
           val localBase = base.asInstanceOf[Local]
           localDefs.getDefsOfAt(local, invokeStmt).forEach(sourceStmt => {
             val sourceNode = createNode(sootMethod, sourceStmt, visitedMethods)
-            localDefs.getDefsOfAt(localBase, invokeStmt).forEach(targetStmt =>{
+            localDefs.getDefsOfAt(localBase, invokeStmt).forEach(targetStmt => {
               val targetNode = createNode(sootMethod, targetStmt, visitedMethods)
               updateGraph(sourceNode, targetNode)
             })
@@ -82,7 +86,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   private def getBaseObject(expr: InvokeExpr) =
     if (expr.isInstanceOf[VirtualInvokeExpr])
       expr.asInstanceOf[VirtualInvokeExpr].getBase
-    else if(expr.isInstanceOf[SpecialInvokeExpr])
+    else if (expr.isInstanceOf[SpecialInvokeExpr])
       expr.asInstanceOf[SpecialInvokeExpr].getBase
     else
       expr.asInstanceOf[InstanceInvokeExpr].getBase
@@ -105,10 +109,10 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   trait CopyFromMethodCallToLocal extends RuleAction {
     def apply(sootMethod: SootMethod, invokeStmt: jimple.Stmt, localDefs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
       val expr = invokeStmt.getInvokeExpr
-      if(hasBaseObject(expr) && invokeStmt.isInstanceOf[jimple.AssignStmt]) {
+      if (hasBaseObject(expr) && invokeStmt.isInstanceOf[jimple.AssignStmt]) {
         val base = getBaseObject(expr)
         val local = invokeStmt.asInstanceOf[jimple.AssignStmt].getLeftOp
-        if(base.isInstanceOf[Local] && local.isInstanceOf[Local]) {
+        if (base.isInstanceOf[Local] && local.isInstanceOf[Local]) {
           val localBase = base.asInstanceOf[Local]
           localDefs.getDefsOfAt(localBase, invokeStmt).forEach(source => {
             val sourceNode = createNode(sootMethod, source, visitedMethods)
@@ -131,7 +135,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
     def apply(sootMethod: SootMethod, invokeStmt: jimple.Stmt, localDefs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
       val srcArg = invokeStmt.getInvokeExpr.getArg(from)
-      if(invokeStmt.isInstanceOf[JAssignStmt] && srcArg.isInstanceOf[Local]) {
+      if (invokeStmt.isInstanceOf[JAssignStmt] && srcArg.isInstanceOf[Local]) {
         val local = srcArg.asInstanceOf[Local]
         val targetStmt = invokeStmt.asInstanceOf[jimple.AssignStmt]
         localDefs.getDefsOfAt(local, targetStmt).forEach(sourceStmt => {
@@ -155,7 +159,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
  */
   trait CopyBetweenArgs extends RuleAction {
     def from: Int
-    def target : Int
+
+    def target: Int
 
     def apply(sootMethod: SootMethod, invokeStmt: jimple.Stmt, localDefs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
       val srcArg = invokeStmt.getInvokeExpr.getArg(from)
@@ -177,7 +182,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   def initAllocationSites(): Unit = {
     val listener = Scene.v().getReachableMethods.listener()
 
-    while(listener.hasNext) {
+    while (listener.hasNext) {
       val m = listener.next().method()
 
       updateAllocationSites(m, new ListBuffer[VisitedMethods]())
@@ -187,7 +192,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
   def updateAllocationSites(m: SootMethod, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
 
-    if(visitedMethodsAllocationSites.contains(m)) {
+    if (visitedMethodsAllocationSites.contains(m)) {
       return
     }
 
@@ -197,25 +202,32 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       val body = m.getActiveBody
       body.getUnits.forEach(unit => {
         if (unit.isInstanceOf[soot.jimple.AssignStmt]) {
+          val left = unit.asInstanceOf[soot.jimple.AssignStmt].getLeftOp
+          if (left.isInstanceOf[InstanceFieldRef]) {
+            storedFields.add(left.asInstanceOf[InstanceFieldRef].getField)
+          } else if (left.isInstanceOf[StaticFieldRef]) {
+            storedFields.add(left.asInstanceOf[StaticFieldRef].getField)
+          }
+
           val right = unit.asInstanceOf[soot.jimple.AssignStmt].getRightOp
-          if (right.isInstanceOf[soot.jimple.InstanceInvokeExpr]){
+          if (right.isInstanceOf[soot.jimple.InstanceInvokeExpr]) {
             val method = right.asInstanceOf[soot.jimple.InstanceInvokeExpr]
-            updateAllocationSites(method.getMethod, visitedMethods+= new VisitedMethods(method.getMethod, null, 1))
+            updateAllocationSites(method.getMethod, visitedMethods += new VisitedMethods(method.getMethod, null, 1))
           }
           if (right.isInstanceOf[NewExpr] || right.isInstanceOf[NewArrayExpr] || right.isInstanceOf[StringConstant]) {
             allocationSites += (right -> createNode(m, unit, visitedMethods))
           }
         }
-        else if(unit.isInstanceOf[soot.jimple.ReturnStmt]) {
+        else if (unit.isInstanceOf[soot.jimple.ReturnStmt]) {
           val exp = unit.asInstanceOf[soot.jimple.ReturnStmt].getOp
-          if(exp.isInstanceOf[StringConstant]) {
+          if (exp.isInstanceOf[StringConstant]) {
             allocationSites += (exp -> createNode(m, unit, visitedMethods))
           }
         }
 
-        if (unit.isInstanceOf[soot.jimple.InvokeStmt]){
+        if (unit.isInstanceOf[soot.jimple.InvokeStmt]) {
           val method = unit.asInstanceOf[soot.jimple.InvokeStmt]
-          updateAllocationSites(method.getInvokeExpr.getMethod, visitedMethods+=VisitedMethods(method.getInvokeExpr.getMethod, null, 1))
+          updateAllocationSites(method.getInvokeExpr.getMethod, visitedMethods += VisitedMethods(method.getInvokeExpr.getMethod, null, 1))
         }
 
       })
@@ -235,12 +247,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     }
   }
 
-  def traverse(method: SootMethod, visitedMethods: ListBuffer[VisitedMethods], forceNewTraversal: Boolean = false) : Unit = {
-    if((!forceNewTraversal) && (method.isPhantom || traversedMethods.contains(method))) {
-      return
-    }
-
-    if (isLimited() && visitedMethodsDepth.size >= maxDepth()){
+  def traverse(method: SootMethod, visitedMethods: ListBuffer[VisitedMethods], forceNewTraversal: Boolean = false): Unit = {
+    if ((!forceNewTraversal) && shouldSkip(method)) {
       return
     }
 
@@ -248,19 +256,39 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
     val startTime = System.nanoTime()
 
-//    visitedMethods += new VisitedMethods(method, null, method.getJavaSourceStartLineNumber)
+    //    visitedMethods += new VisitedMethods(method, null, method.getJavaSourceStartLineNumber)
 
     traversedMethods.add(method)
 
-    val body  = method.retrieveActiveBody()
+    val body = method.retrieveActiveBody()
     val graph = new ExceptionalUnitGraph(body)
-    val defs  = new SimpleLocalDefs(graph)
+    val defs = new SimpleLocalDefs(graph)
 
+    traverseUnits(method, defs, visitedMethods)
+
+    val endTime = System.nanoTime()
+    val elapsedTime = (endTime - startTime) / 1000000
+
+    val elapsedSeconds = elapsedTime / 1000.0 // time in seconds
+
+    if (printDepthVisitedMethods) {
+      val methodsString = visitedMethodsDepth.map(_.toString).mkString(", ")
+      s"path: [$methodsString]"
+      println(method.toString + "path:" + methodsString + "-> deep: " + visitedMethodsDepth.size + " time: " + elapsedSeconds)
+    }
+
+    traversedMethods.remove(method)
+  }
+
+  private def traverseUnits(method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
+    val body = method.getActiveBody
     body.getUnits.forEach(unit => {
       val v = Statement.convert(unit)
+
       val auxVisitedMethod = new ListBuffer[VisitedMethods]()
       auxVisitedMethod.++=(visitedMethods)
       auxVisitedMethod += new VisitedMethods(method, unit, unit.getJavaSourceStartLineNumber)
+
       v match {
         case AssignStmt(base) => traverse(AssignStmt(base), method, defs, auxVisitedMethod)
         case InvokeStmt(base) => traverse(InvokeStmt(base), method, defs, auxVisitedMethod)
@@ -268,51 +296,42 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
         case _ =>
       }
     })
-
-    val endTime = System.nanoTime()
-    val elapsedTime = (endTime - startTime) / 1000000
-
-    val elapsedSeconds = elapsedTime / 1000.0 // time in seconds
-
-    if (printDepthVisitedMethods){
-      val methodsString = visitedMethodsDepth.map(_.toString).mkString(", ")
-                          s"path: [$methodsString]"
-      println(method.toString+"path:"+methodsString+"-> deep: "+ visitedMethodsDepth.size+" time: "+ elapsedSeconds)
-    }
-
   }
 
-  def traverse(assignStmt: AssignStmt, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) : Unit = {
+  def traverse(assignStmt: AssignStmt, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     val left = assignStmt.stmt.getLeftOp
     val right = assignStmt.stmt.getRightOp
 
     (left, right) match {
       case (p: Local, q: InstanceFieldRef) => loadRule(assignStmt.stmt, q, method, defs, visitedMethods)
+      case (p: Local, q: StaticFieldRef) => loadStaticFieldRule(assignStmt.stmt, q, method, defs, visitedMethods)
       case (p: Local, q: ArrayRef) => loadArrayRule(assignStmt.stmt, q, method, defs, visitedMethods)
       case (p: Local, q: InvokeExpr) => invokeRule(assignStmt, q, method, defs, visitedMethods)
       case (p: Local, q: Local) => copyRule(assignStmt.stmt, q, method, defs, visitedMethods)
       case (p: Local, _) => copyRuleInvolvingExpressions(assignStmt.stmt, method, defs, visitedMethods)
       case (p: InstanceFieldRef, q: Object) => storeRule(assignStmt.stmt, q, p, method, defs, visitedMethods)
+      case (p: StaticFieldRef, q: Object) => storeStaticFieldRule(assignStmt.stmt, q, p, method, defs, visitedMethods)
       case (p: JArrayRef, _) => storeArrayRule(assignStmt)
       case _ =>
     }
 
   }
 
-  def traverse(stmt: InvokeStmt, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) : Unit = {
+  def traverse(stmt: InvokeStmt, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     val exp = stmt.stmt.getInvokeExpr
     invokeRule(stmt, exp, method, defs, visitedMethods)
   }
 
   def traverseSinkStatement(statement: Statement, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     statement.base.getUseBoxes.forEach(box => {
-      box match {
-        case local : Local => copyRule(statement.base, local, method, defs, visitedMethods)
-        case fieldRef : InstanceFieldRef => loadRule(statement.base, fieldRef, method, defs, visitedMethods)
+      val value = box.getValue
+      value match {
+        case local: Local => copyRule(statement.base, local, method, defs, visitedMethods)
+        case fieldRef: InstanceFieldRef => loadRule(statement.base, fieldRef, method, defs, visitedMethods)
+        case fieldRef: StaticFieldRef => loadStaticFieldRule(statement.base, fieldRef, method, defs, visitedMethods)
         case _ =>
         // TODO:
         //   we have to think about other cases here.
-        //   e.g: a reference to a parameter
       }
     })
   }
@@ -334,20 +353,18 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   }
 
   private def invokeRule(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
-    val callee = exp.getMethod
-
-    if(analyze(callStmt.base) == SinkNode) {
+    if (analyze(callStmt.base) == SinkNode) {
       defsToCallOfSinkMethod(callStmt, exp, caller, defs, visitedMethods)
     }
 
-    if(analyze(callStmt.base) == SourceNode || analyze(callStmt.base) == SinkNode) {
+    if (analyze(callStmt.base) == SourceNode || analyze(callStmt.base) == SinkNode) {
       val source = createNode(caller, callStmt.base, visitedMethods)
       svg.addNode(source)
     }
 
     //Add edge from defs statements to invoke statement use
     callStmt.base.getUseBoxes.forEach(stmt => {
-      if(stmt.getValue.isInstanceOf[Local]) {
+      if (stmt.getValue.isInstanceOf[Local]) {
         val local = stmt.getValue.asInstanceOf[Local]
 
         defs.getDefsOfAt(local, callStmt.base).forEach(sourceStmt => {
@@ -358,40 +375,72 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       }
     })
 
-    for(r <- methodRules) {
-      if(r.check(callee)) {
+    val callGraph = Scene.v().getCallGraph
+    val edges = callGraph.edgesOutOf(callStmt.base)
+
+    if (edges.hasNext) {
+      while (edges.hasNext) {
+        val edge = edges.next()
+        val callee = edge.getTgt().method()
+        applyRulesAndTraverse(callStmt, exp, caller, callee, defs, visitedMethods)
+      }
+    } else {
+      val callee = exp.getMethod
+      applyRulesAndTraverse(callStmt, exp, caller, callee, defs, visitedMethods)
+    }
+  }
+
+  private def applyRulesAndTraverse(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, callee: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
+    for (r <- methodRules) {
+      if (r.check(callee)) {
         r.apply(caller, callStmt.base.asInstanceOf[jimple.Stmt], defs, visitedMethods)
         return
       }
     }
 
-    if(intraprocedural()) return
+    if (intraprocedural()) return
 
-    var pmtCount = 0
+    if (!callee.hasActiveBody) {
+      try {
+        callee.retrieveActiveBody()
+      } catch {
+        case e: Exception => 
+          return
+      }
+    }
+
     val body = callee.retrieveActiveBody()
     val g = new ExceptionalUnitGraph(body)
     val calleeDefs = new SimpleLocalDefs(g)
 
+    var pmtCount = 0
     body.getUnits.forEach(s => {
-      if(isThisInitStmt(exp, s)) {
+      if (isThisInitStmt(exp, s)) {
         defsToThisObject(callStmt, caller, defs, s, exp, callee, visitedMethods)
       }
-      else if(isParameterInitStmt(exp, pmtCount, s)) {
+      else if (isParameterInitStmt(exp, pmtCount, s)) {
         defsToFormalArgs(callStmt, caller, defs, s, exp, callee, pmtCount, visitedMethods)
         pmtCount = pmtCount + 1
       }
-      else if(isAssignReturnLocalStmt(callStmt.base, s)) {
+      else if (isAssignReturnLocalStmt(callStmt.base, s)) {
         defsToCallSite(caller, callee, calleeDefs, callStmt.base, s, visitedMethods)
       }
-      else if(isReturnStringStmt(callStmt.base, s)) {
+      else if (isReturnStringStmt(callStmt.base, s)) {
         stringToCallSite(caller, callee, callStmt.base, s, visitedMethods)
       }
     })
     visitedMethodsDepth += callee.retrieveActiveBody().getMethod
 
-    traverse(callee, visitedMethods)
+    val nextVisitedMethods = new scala.collection.mutable.ListBuffer[VisitedMethods]()
+    nextVisitedMethods.++=(visitedMethods)
+    // Fix for DFP: if the parent traversal didn't append the current caller to the stack, we append it here
+    if (nextVisitedMethods.isEmpty || nextVisitedMethods.last.getUnit != callStmt.base) {
+      nextVisitedMethods += new VisitedMethods(caller, callStmt.base, callStmt.base.getJavaSourceStartLineNumber)
+    }
 
-    visitedMethodsDepth -= callee.retrieveActiveBody().getMethod
+    traverse(callee, nextVisitedMethods)
+
+    visitedMethodsDepth.remove(visitedMethodsDepth.size - 1)
   }
 
   private def applyPhantomMethodCallRule(callStmt: Statement, exp: InvokeExpr, caller: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
@@ -434,7 +483,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
    */
   def copyRuleInvolvingExpressions(stmt: jimple.AssignStmt, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
     stmt.getRightOp.getUseBoxes.forEach(box => {
-      if(box.getValue.isInstanceOf[Local]) {
+      if (box.getValue.isInstanceOf[Local]) {
         val local = box.getValue.asInstanceOf[Local]
         copyRule(stmt, local, method, defs, visitedMethods)
       }
@@ -446,12 +495,12 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
    *
    *  (*) p = q.f
    */
-  protected def loadRule(stmt: soot.Unit, ref: InstanceFieldRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) : Unit = {
+  protected def loadRule(stmt: soot.Unit, ref: InstanceFieldRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     val base = ref.getBase
     // value field of a string.
     val className = ref.getFieldRef.declaringClass().getName
-    if((className == "java.lang.String") && ref.getFieldRef.name == "value") {
-      if(base.isInstanceOf[Local]) {
+    if ((className == "java.lang.String") && ref.getFieldRef.name == "value") {
+      if (base.isInstanceOf[Local]) {
         defs.getDefsOfAt(base.asInstanceOf[Local], stmt).forEach(source => {
           val sourceNode = createNode(method, source, visitedMethods)
           val targetNode = createNode(method, stmt, visitedMethods)
@@ -461,7 +510,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       return;
     }
     // default case
-    if(base.isInstanceOf[Local]) {
+    if (base.isInstanceOf[Local]) {
       var allocationNodes = findAllocationSites(base.asInstanceOf[Local], false, ref.getField)
 
       if (allocationNodes.isEmpty) {
@@ -475,14 +524,14 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       allocationNodes.foreach(source => {
         val target = createNode(method, stmt, visitedMethods)
         updateGraph(source, target)
-        svg.getAdjacentNodes(source).get.foreach(s => updateGraph(s, target))
+        svg.getAdjacentNodes(source).getOrElse(List()).foreach(s => updateGraph(s, target))
       })
 
       // create an edge from the base defs to target
       // if an object is tainted, we should propagate the taint to all
       // fields as well. Not completely sure if this should be
       // the case.
-      if(propagateObjectTaint()) {
+      if (propagateObjectTaint()) {
         defs.getDefsOfAt(base.asInstanceOf[Local], stmt).forEach(source => {
           val sourceNode = createNode(method, source, visitedMethods)
           val targetNode = createNode(method, stmt, visitedMethods)
@@ -492,10 +541,10 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     }
   }
 
-  protected def loadArrayRule(targetStmt: soot.Unit, ref: ArrayRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) : Unit = {
+  protected def loadArrayRule(targetStmt: soot.Unit, ref: ArrayRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     val base = ref.getBase
 
-    if(base.isInstanceOf[Local]) {
+    if (base.isInstanceOf[Local]) {
       val local = base.asInstanceOf[Local]
 
       defs.getDefsOfAt(local, targetStmt).forEach(sourceStmt => {
@@ -513,13 +562,34 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     }
   }
 
+  protected def loadStaticFieldRule(stmt: soot.Unit, ref: StaticFieldRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
+    val allocationNodes = findAllocationSitesForStaticField(ref.getField)
+    val target = createNode(method, stmt, visitedMethods)
+    allocationNodes.foreach(source => {
+      updateGraph(source, target)
+    })
+  }
+
+  protected def storeStaticFieldRule(stmt: jimple.AssignStmt, rightOp: Object, ref: StaticFieldRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
+    if (rightOp.isInstanceOf[Local]) {
+      val sourceLocal = rightOp.asInstanceOf[Local]
+      defs.getDefsOfAt(sourceLocal, stmt).forEach(sourceStmt => {
+        val source = createNode(method, sourceStmt, visitedMethods)
+        val allocationNodes = findAllocationSitesForStaticField(ref.getField)
+        allocationNodes.foreach(target => {
+          updateGraph(source, target)
+        })
+      })
+    }
+  }
+
   /*
    * This rule deals with statements in the form:
    *
    * (*) p.f = expression
    */
   private def storeRule(targetStmt: jimple.AssignStmt, q: Object, fieldRef: InstanceFieldRef, method: SootMethod, defs: SimpleLocalDefs, visitedMethods: ListBuffer[VisitedMethods]) = {
-    if (q.isInstanceOf[Local]){
+    if (q.isInstanceOf[Local]) {
       val local = targetStmt.getRightOp.asInstanceOf[Local]
       if (fieldRef.getBase.isInstanceOf[Local]) {
         val base = fieldRef.getBase.asInstanceOf[Local]
@@ -571,7 +641,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       val csCloseLabel = createCSCloseLabel(caller, callStmt, callee)
       svg.addEdge(source, target, csCloseLabel)
 
-      if(local.getType.isInstanceOf[ArrayType]) {
+      if (local.getType.isInstanceOf[ArrayType]) {
         val stores = arrayStores.getOrElseUpdate(local, List())
         stores.foreach(sourceStmt => {
           val source = createNode(callee, sourceStmt, visitedMethods)
@@ -588,7 +658,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     svg.addEdge(source, target)
   }
 
-  private def defsToThisObject(callStatement: Statement, caller: SootMethod, calleeDefs: SimpleLocalDefs, targetStmt: soot.Unit, expr: InvokeExpr, callee: SootMethod, visitedMethods: ListBuffer[VisitedMethods]) : Unit = {
+  private def defsToThisObject(callStatement: Statement, caller: SootMethod, calleeDefs: SimpleLocalDefs, targetStmt: soot.Unit, expr: InvokeExpr, callee: SootMethod, visitedMethods: ListBuffer[VisitedMethods]): Unit = {
     val invokeExpr = expr match {
       case e: VirtualInvokeExpr => e
       case e: SpecialInvokeExpr => e
@@ -598,8 +668,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       // we can just match with InstanceInvokeExpr
     }
 
-    if(invokeExpr != null) {
-      if(invokeExpr.getBase.isInstanceOf[Local]) {
+    if (invokeExpr != null) {
+      if (invokeExpr.getBase.isInstanceOf[Local]) {
 
         val target = createNode(callee, targetStmt, visitedMethods)
 
@@ -635,7 +705,7 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
         updateGraph(source, target)
       })
 
-      if(local.getType.isInstanceOf[ArrayType]) {
+      if (local.getType.isInstanceOf[ArrayType]) {
         val stores = arrayStores.getOrElseUpdate(local, List())
         stores.foreach(sourceStmt => {
           val source = createNode(caller, sourceStmt, visitedMethods)
@@ -645,8 +715,8 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       }
     })
     // edges from definition to base object of an invoke expression
-    if(isFieldSensitiveAnalysis() && exp.isInstanceOf[InstanceInvokeExpr]) {
-      if(exp.asInstanceOf[InstanceInvokeExpr].getBase.isInstanceOf[Local]) {
+    if (isFieldSensitiveAnalysis() && exp.isInstanceOf[InstanceInvokeExpr]) {
+      if (exp.asInstanceOf[InstanceInvokeExpr].getBase.isInstanceOf[Local]) {
         val local = exp.asInstanceOf[InstanceInvokeExpr].getBase.asInstanceOf[Local]
         val targetStmt = stmt.base
         defs.getDefsOfAt(local, targetStmt).forEach(sourceStmt => {
@@ -677,13 +747,13 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     CallSiteLabel(ContextSensitiveRegion(statement, callee.toString), CallSiteCloseLabel)
   }
 
-  def isThisInitStmt(expr: InvokeExpr, unit: soot.Unit) : Boolean =
+  def isThisInitStmt(expr: InvokeExpr, unit: soot.Unit): Boolean =
     unit.isInstanceOf[IdentityStmt] && unit.asInstanceOf[IdentityStmt].getRightOp.isInstanceOf[ThisRef]
 
-  def isParameterInitStmt(expr: InvokeExpr, pmtCount: Int, unit: soot.Unit) : Boolean =
+  def isParameterInitStmt(expr: InvokeExpr, pmtCount: Int, unit: soot.Unit): Boolean =
     unit.isInstanceOf[IdentityStmt] && unit.asInstanceOf[IdentityStmt].getRightOp.isInstanceOf[ParameterRef] && expr.getArg(pmtCount).isInstanceOf[Local]
 
-  def isAssignReturnLocalStmt(callSite: soot.Unit, unit: soot.Unit) : Boolean =
+  def isAssignReturnLocalStmt(callSite: soot.Unit, unit: soot.Unit): Boolean =
     unit.isInstanceOf[ReturnStmt] && unit.asInstanceOf[ReturnStmt].getOp.isInstanceOf[Local] &&
       callSite.isInstanceOf[soot.jimple.AssignStmt]
 
@@ -691,26 +761,125 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
     unit.isInstanceOf[ReturnStmt] && unit.asInstanceOf[ReturnStmt].getOp.isInstanceOf[StringConstant] &&
       callSite.isInstanceOf[soot.jimple.AssignStmt]
 
-  def findAllocationSites(local: Local, oldSet: Boolean = true, field: SootField = null) : ListBuffer[GraphNode] = {
-    val pta = if(pointsToAnalysis.isInstanceOf[PAG]) pointsToAnalysis.asInstanceOf[PAG]
-    else if (pointsToAnalysis.isInstanceOf[DemandCSPointsTo]) pointsToAnalysis.asInstanceOf[DemandCSPointsTo].getPAG
-    else null
+  def findAllocationSites(local: Local, oldSet: Boolean = true, field: SootField = null): ListBuffer[GraphNode] = {
+    if (pointsToAnalysis != null) {
+      val reachingObjects = if (field == null) pointsToAnalysis.reachingObjects(local)
+      else pointsToAnalysis.reachingObjects(local, field)
 
-    if(pta != null) {
-      val reachingObjects = if(field == null) pta.reachingObjects(local.asInstanceOf[Local])
-      else pta.reachingObjects(local, field)
-
-      if(!reachingObjects.isEmpty) {
-        val allocations = if(oldSet) reachingObjects.asInstanceOf[DoublePointsToSet].getOldSet
-        else reachingObjects.asInstanceOf[DoublePointsToSet].getNewSet
-
-        val v = new AllocationVisitor()
-        allocations.asInstanceOf[HybridPointsToSet].forall(v)
-        return v.allocationNodes
+      if (reachingObjects != null && !reachingObjects.isEmpty) {
+        val res = findAllocationSitesFromPS(reachingObjects, oldSet)
+        if (res.nonEmpty) return res
       }
     }
-    new ListBuffer[GraphNode]()
+    findAllocationSitesByType(local, field)
   }
+
+  def findAllocationSitesForStaticField(field: SootField): ListBuffer[GraphNode] = {
+    if (pointsToAnalysis != null) {
+      val reachingObjects = pointsToAnalysis.reachingObjects(field)
+      if (reachingObjects != null && !reachingObjects.isEmpty) {
+        val res = findAllocationSitesFromPS(reachingObjects, true)
+        if (res.nonEmpty) return res
+      }
+    }
+    // For static fields, fallback to type compatibility if possible
+    val res = new ListBuffer[GraphNode]()
+    val fieldType = field.getType
+    val hierarchy = Scene.v().getOrMakeFastHierarchy
+
+    for ((key, node) <- allocationSites) {
+      val keyType = key match {
+        case n: NewExpr => n.getType
+        case n: NewArrayExpr => n.getType
+        case n: StringConstant => n.getType
+        case _ => null
+      }
+      if (node != null && keyType != null && (keyType == fieldType || (keyType.isInstanceOf[RefType] && fieldType.isInstanceOf[RefType] && hierarchy.canStoreType(keyType, fieldType)))) {
+        res += node
+      }
+    }
+    res
+  }
+
+  private def findAllocationSitesFromPS(reachingObjects: PointsToSet, oldSet: Boolean): ListBuffer[GraphNode] = {
+    val v = new AllocationVisitor()
+    if (reachingObjects.isInstanceOf[DoublePointsToSet]) {
+      val allocations = if (oldSet) reachingObjects.asInstanceOf[DoublePointsToSet].getOldSet
+      else reachingObjects.asInstanceOf[DoublePointsToSet].getNewSet
+      if (allocations.isInstanceOf[PointsToSetInternal]) {
+        allocations.asInstanceOf[PointsToSetInternal].forall(v)
+      }
+    } else if (reachingObjects.isInstanceOf[PointsToSetInternal]) {
+      reachingObjects.asInstanceOf[PointsToSetInternal].forall(v)
+    }
+    v.allocationNodes
+  }
+
+  /**
+   * Fallback para encontrar allocation sites quando não há PAG disponível (CHA/RTA).
+   * Usa compatibilidade de tipo via FastHierarchy (mesma estratégia da OverrideAssignment).
+   *
+   * Para cada nó no grafo que seja um AssignStmt com NewExpr no right-op,
+   * verifica se o tipo alocado é compatível (mesmo tipo ou subtipo) com o tipo da variável local.
+   * Se um field for especificado, também verifica se há um store para esse field no nó.
+   */
+  def findAllocationSitesByType(local: Local, field: SootField = null): ListBuffer[GraphNode] = {
+    val res = new ListBuffer[GraphNode]()
+    val localType = local.getType
+
+    val targetType = if (field != null) field.getType else local.getType
+
+    val hierarchy = Scene.v().getOrMakeFastHierarchy
+
+    for ((key, node) <- allocationSites) {
+      val allocType = key match {
+        case newExpr: NewExpr => newExpr.getBaseType
+        case newArrayExpr: NewArrayExpr => newArrayExpr.getType
+        case _: StringConstant => RefType.v("java.lang.String")
+        case _ => null
+      }
+
+      if (allocType != null && isTypeCompatible(targetType, allocType, hierarchy)) {
+        if (field == null || hasAnyFieldStore(field)) {
+          if (node != null) res += node
+        }
+      }
+    }
+    res
+  }
+
+  private def hasAnyFieldStore(field: SootField): Boolean = {
+    storedFields.contains(field)
+  }
+
+  /**
+   * Verifica compatibilidade de tipo usando FastHierarchy.canStoreType,
+   * seguindo o padrão da OverrideAssignment.isSameOrSubtype.
+   *
+   * Retorna true se:
+   * - Os tipos são iguais, OU
+   * - Um é subtipo do outro (em qualquer direção)
+   */
+  private def isTypeCompatible(typeA: soot.Type, typeB: soot.Type, hierarchy: FastHierarchy): Boolean = {
+    if (typeA == typeB || typeA.equals(typeB)) return true
+
+    (typeA, typeB) match {
+      case (a: RefType, b: RefType) =>
+        hierarchy.canStoreType(a, b) || hierarchy.canStoreType(b, a)
+      case (a: ArrayType, b: ArrayType) =>
+        (a.baseType, b.baseType) match {
+          case (ba: RefType, bb: RefType) =>
+            hierarchy.canStoreType(ba, bb) || hierarchy.canStoreType(bb, ba)
+          case _ => a.baseType.equals(b.baseType)
+        }
+      case _ => false
+    }
+  }
+
+  /**
+   * Verifica se existe um store para o field especificado em algum nó do grafo
+   * cujo allocation site corresponde ao nó dado.
+   */
 
   /*
    * a class to visit the allocation nodes of the objects that
@@ -727,24 +896,24 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
       if (n.isInstanceOf[AllocNode]) {
         val allocationNode = n.asInstanceOf[AllocNode]
 
-        var stmt : StatementNode = null
+        var stmt: StatementNode = null
 
         if (allocationNode.getNewExpr.isInstanceOf[NewExpr]) {
           if (allocationSites.contains(allocationNode.getNewExpr.asInstanceOf[NewExpr])) {
             stmt = allocationSites(allocationNode.getNewExpr.asInstanceOf[NewExpr])
           }
         }
-        else if(allocationNode.getNewExpr.isInstanceOf[NewArrayExpr]) {
+        else if (allocationNode.getNewExpr.isInstanceOf[NewArrayExpr]) {
           if (allocationSites.contains(allocationNode.getNewExpr.asInstanceOf[NewArrayExpr])) {
             stmt = allocationSites(allocationNode.getNewExpr.asInstanceOf[NewArrayExpr])
           }
         }
-        else if(allocationNode.getNewExpr.isInstanceOf[String]) {
+        else if (allocationNode.getNewExpr.isInstanceOf[String]) {
           val str: StringConstant = StringConstant.v(allocationNode.getNewExpr.asInstanceOf[String])
           stmt = allocationSites.getOrElseUpdate(str, null)
         }
 
-        if(stmt != null) {
+        if (stmt != null) {
           allocationNodes += stmt
         }
       }
@@ -764,22 +933,63 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
    */
   def runInFullSparsenessMode() = true
 
-  def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]) : ListBuffer[GraphNode] = {
+  //  def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
+  //    val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
+  //    for (node <- svg.nodes()) {
+  //      if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
+  //        val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
+  //        if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
+  //          val base = assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getBase.asInstanceOf[Local]
+  //          if (pointsToAnalysis.reachingObjects(base).hasNonEmptyIntersection(pointsToAnalysis.reachingObjects(local))) {
+  //            if (field.equals(assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getField)) {
+  //              res += createNode(node.method(), node.unit(), visitedMethods)
+  //            }
+  //          }
+  //        }
+  //      }
+  //    }
+  //    return res
+  //  }
+
+  def findFieldStores(local: Local, field: SootField, visitedMethods: ListBuffer[VisitedMethods]): ListBuffer[GraphNode] = {
     val res: ListBuffer[GraphNode] = new ListBuffer[GraphNode]()
-    for(node <- svg.nodes()) {
-      if(node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
-        val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
-        if(assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
-          val base = assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getBase.asInstanceOf[Local]
-          if(pointsToAnalysis.reachingObjects(base).hasNonEmptyIntersection(pointsToAnalysis.reachingObjects(local))) {
-            if(field.equals(assignment.getLeftOp.asInstanceOf[InstanceFieldRef].getField)) {
-              res += createNode(node.method(), node.unit(), visitedMethods)
+    try {
+      for (node <- svg.nodes()) {
+        if (node.unit().isInstanceOf[soot.jimple.AssignStmt]) {
+          val assignment = node.unit().asInstanceOf[soot.jimple.AssignStmt]
+          if (assignment.getLeftOp.isInstanceOf[InstanceFieldRef]) {
+            val instanceRef = assignment.getLeftOp.asInstanceOf[InstanceFieldRef]
+            val base = instanceRef.getBase match {
+              case l: Local => l
+              case _ => null
+            }
+            if (base != null && local != null && field.equals(instanceRef.getField)) {
+              if (pointsToAnalysis != null) {
+                val baseObjs = pointsToAnalysis.reachingObjects(base)
+                val localObjs = pointsToAnalysis.reachingObjects(local)
+
+                if (baseObjs != null && localObjs != null
+                  && !baseObjs.isEmpty && !localObjs.isEmpty) {
+                  // SPARK/VTA: usa interseção de points-to (preciso)
+                  if (baseObjs.hasNonEmptyIntersection(localObjs)) {
+                    res += createNode(node.method(), node.unit(), visitedMethods)
+                  }
+                }
+              } else {
+                // CHA/RTA: points-to vazio, fallback por tipo
+                val hierarchy = Scene.v().getOrMakeFastHierarchy
+                if (isTypeCompatible(base.getType, local.getType, hierarchy)) {
+                  res += createNode(node.method(), node.unit(), visitedMethods)
+                }
+              }
             }
           }
         }
       }
+    } catch {
+      case _: Exception =>
     }
-    return res
+    res
   }
 
   //  /*
@@ -788,17 +998,20 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   //   */
 
   def containsNodeDF(node: StatementNode): StatementNode = {
-    for (n <- svg.edges()){
+    for (n <- svg.edges()) {
       var auxNodeFrom = n.from.asInstanceOf[StatementNode]
       var auxNodeTo = n.to.asInstanceOf[StatementNode]
-      if (auxNodeFrom.equals(node)) return n.from.asInstanceOf[StatementNode]
-      if (auxNodeTo.equals(node)) return n.to.asInstanceOf[StatementNode]
+      if (auxNodeFrom != null && auxNodeFrom.equals(node)) return n.from.asInstanceOf[StatementNode]
+      if (auxNodeTo != null && auxNodeTo.equals(node)) return n.to.asInstanceOf[StatementNode]
     }
     return null
   }
+
   def updateGraph(source: GraphNode, target: GraphNode, forceNewEdge: Boolean = false): Boolean = {
     var res = false
-    if(!runInFullSparsenessMode() || true) {
+    if (source == null || target == null) return false
+
+    if (!runInFullSparsenessMode() || true) {
       addNodeAndEdgeDF(source.asInstanceOf[StatementNode], target.asInstanceOf[StatementNode])
 
       res = true
@@ -809,13 +1022,13 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
   def addNodeAndEdgeDF(from: StatementNode, to: StatementNode): Unit = {
     var auxNodeFrom = containsNodeDF(from)
     var auxNodeTo = containsNodeDF(to)
-    if (auxNodeFrom != null){
-      if (auxNodeTo != null){
+    if (auxNodeFrom != null) {
+      if (auxNodeTo != null) {
         svg.addEdge(auxNodeFrom, auxNodeTo)
-      }else{
+      } else {
         svg.addEdge(auxNodeFrom, to)
       }
-    }else {
+    } else {
       if (auxNodeTo != null) {
         svg.addEdge(from, auxNodeTo)
       } else {
@@ -830,6 +1043,95 @@ abstract class JSVFA extends SVFA with Analysis with AnalysisDepth with FieldSen
 
   def getNumberVisitedMethods(): Int = {
     return numberVisitedMethods
+  }
+
+  def getCountNoEdges: Int = countNoEdges
+
+  def getCountWithEdges: Int = countWithEdges
+
+  private def shouldSkip(method: SootMethod): Boolean = {
+
+    val isCycle = traversedMethods.contains(method)
+    val relativeTraversed = hasRelativeBeenTraversed(method)
+
+    val res = method.isPhantom ||
+      isCycle ||
+      relativeTraversed ||
+      (isLimited() && visitedMethodsDepth.size >= maxDepth()) ||
+      isMethodDefinedInObject(method)
+
+    res
+  }
+
+  private def hasRelativeBeenTraversed(method: SootMethod): Boolean = {
+    visitedMethodsDepth.exists(m => m != method && haveCommonAncestorClass(method, m))
+  }
+
+  private def haveCommonAncestorClass(method1: SootMethod, method2: SootMethod): Boolean = {
+    val ancestors1 = getAncestors(method1).asScala
+    val ancestors2 = getAncestors(method2).asScala
+
+    for (ancestor1 <- ancestors1) {
+      for (ancestor2 <- ancestors2) {
+        try {
+          val ancestorMethod1 = ancestor1.getMethod(method1.getName, method1.getParameterTypes)
+          val ancestorMethod2 = ancestor2.getMethod(method2.getName, method2.getParameterTypes)
+          return ancestorMethod1 == ancestorMethod2
+        } catch {
+          case _: Exception => // ignore
+        }
+      }
+    }
+    false
+  }
+
+  private def getAncestors(method: SootMethod): java.util.Set[soot.SootClass] = {
+    val ancestors = new java.util.HashSet[soot.SootClass]()
+    var sootClass = method.getDeclaringClass
+    ancestors.add(sootClass)
+    while (sootClass.hasSuperclass) {
+      sootClass = sootClass.getSuperclass
+      ancestors.add(sootClass)
+    }
+
+    // Get interfaces recursively
+    val interfaces = new java.util.HashSet[soot.SootClass]()
+    val queue = new java.util.LinkedList[soot.SootClass]()
+    ancestors.asScala.foreach(c => queue.add(c))
+
+    while (!queue.isEmpty) {
+      val c = queue.poll()
+      c.getInterfaces.asScala.foreach(i => {
+        if (!ancestors.contains(i)) {
+          ancestors.add(i)
+          queue.add(i)
+        }
+      })
+    }
+
+    val ancestorsWithMethod = new java.util.HashSet[soot.SootClass]()
+    ancestors.asScala.foreach(ancestor => {
+      try {
+        val ancestorMethod = ancestor.getMethod(method.getName, method.getParameterTypes)
+        if (ancestorMethod != null) {
+          ancestorsWithMethod.add(ancestor)
+        }
+      } catch {
+        case _: Exception => // ignore
+      }
+    })
+    ancestorsWithMethod
+  }
+
+  private def isMethodDefinedInObject(method: SootMethod): Boolean = {
+    val methodName = method.getName
+    methodName.equals("toString") ||
+      methodName.equals("hashCode") ||
+      methodName.equals("equals") ||
+      methodName.equals("getClass") ||
+      methodName.equals("notify") ||
+      methodName.equals("notifyAll") ||
+      methodName.equals("wait")
   }
 
 }

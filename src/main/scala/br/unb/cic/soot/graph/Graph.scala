@@ -58,7 +58,7 @@ trait LambdaNode extends scala.AnyRef {
 case class Statement(className: String, method: String, stmt: String, line: Int, sootUnit: soot.Unit = null, sootMethod: soot.SootMethod = null)
 
 case class VisitedMethods(sootMethod: soot.SootMethod = null, sootUnit: soot.Unit = null, line: Int) {
-  override def toString: String = s"($sootMethod, ${sootUnit.toString().replace("\"", "\'")}, $line)"
+  override def toString: String = s"($sootMethod, ${if (sootUnit != null) sootUnit.toString().replace("\"", "\'") else "null"}, $line)"
 
   /**
    * Creates an alternative representation of the object in JSON format.
@@ -345,8 +345,9 @@ class Graph() {
 
       val foundedPaths = findPathsOP(sourceNode, sourceNode, sinkNode, HashSet(sourceNode), ignoredNodes, maxConflictsNumber)
       val validPaths = foundedPaths.filter(path => isValidPath(sourceNode, sinkNode, path))
-      if (validPaths.nonEmpty)
+      if (validPaths.nonEmpty) {
         paths = paths ++ List(validPaths.head)
+      }
     }
 
     return paths
@@ -555,27 +556,29 @@ class Graph() {
       if (element.isDefined) element.get.replaceAll("\"", "\'") else "unknown"
     }
 
-    // Create the JSON format for each conflict
-    findConflictingPaths().map(p => {
-      // Get the definition and use nodes
-      val defNode = p.head.pathVisitedMethods.last
-      val defUnit = if (defNode.getUnit != null) defNode.getUnit else defNode.getMatchingUnitFromMethod
-      val defElem = findElementInUnit(defUnit)
+    findConflictingPaths().flatMap { p =>
+      for {
+        defNode <- p.head.pathVisitedMethods.lastOption
+        useNode <- p.last.pathVisitedMethods.lastOption
+      } yield {
+        val defUnit =
+          Option(defNode.getUnit).getOrElse(defNode.getMatchingUnitFromMethod)
+        val useUnit =
+          Option(useNode.getUnit).getOrElse(useNode.getMatchingUnitFromMethod)
 
-      val useNode = p.last.pathVisitedMethods.last
-      val useUnit = if (useNode.getUnit != null) useNode.getUnit else useNode.getMatchingUnitFromMethod
-      val useElem = findElementInUnit(useUnit)
+        val defElem = findElementInUnit(defUnit)
+        val useElem = findElementInUnit(useUnit)
 
-      s"""{
-         |"type": "CONFLICT",
-         |"label": "SVFA conflict",
-         |"body": {
-         |  "description": "$defElem - $useElem",
-         |  "interference": ${p.map(c => c.toJSON).mkString("[", ", ", "]")}
-         |}
-         |}""".stripMargin
+        s"""{
+           |"type": "CONFLICT",
+           |"label": "SVFA conflict",
+           |"body": {
+           |  "description": "$defElem - $useElem",
+           |  "interference": ${p.map(_.toJSON).mkString("[", ", ", "]")}
+           |}
+           |}""".stripMargin
+      }
     }
-    )
   }
 
   def reportConflitcsMessage() = {
@@ -597,15 +600,16 @@ class Graph() {
       val conflicts = findPathsFullGraph()
       conflicts.toSet
     } else {
-      val sourceNodes = nodes.filter(n => n.nodeType == SourceNode)
-      val sinkNodes = nodes.filter(n => n.nodeType == SinkNode)
+      val sourceNodes = nodes.filter(n => n != null && n.nodeType == SourceNode)
+      val sinkNodes = nodes.filter(n => n != null && n.nodeType == SinkNode)
 
       var conflicts: List[List[GraphNode]] = List()
       sourceNodes.foreach(source => {
         sinkNodes.foreach(sink => {
           val paths = findPath(source, sink)
           val pathsHaveSameSourceAndSinkRootTraversedLine: Boolean = conflicts.exists(c => paths.exists(p => c.head.line() == p.head.line() && c.last.line() == p.last.line()))
-          if (!pathsHaveSameSourceAndSinkRootTraversedLine){
+              if (!pathsHaveSameSourceAndSinkRootTraversedLine){
+            paths.foreach(_ => println("[CONFLICT_FOUND]"))
             conflicts = conflicts ++ paths
           }
         })
